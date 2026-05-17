@@ -57,7 +57,7 @@ class KnowledgeEmbedding(Base):
     assistant_id = Column(UUID(as_uuid=True), ForeignKey("assistants.id"), nullable=False)
     chunk_text = Column(Text, nullable=False)
     embedding = Column(JSON, nullable=True)
-    metadata = Column(JSON, default=dict)
+    chunk_metadata = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     assistant = relationship("Assistant", back_populates="knowledge_embeddings")

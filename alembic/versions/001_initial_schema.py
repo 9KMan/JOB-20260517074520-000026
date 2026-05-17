@@ -55,7 +55,7 @@ def upgrade() -> None:
         sa.Column('assistant_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('assistants.id'), nullable=False),
         sa.Column('chunk_text', sa.Text(), nullable=False),
         sa.Column('embedding', postgresql.JSON, nullable=True),
-        sa.Column('metadata', postgresql.JSON, server_default='{}'),
+        sa.Column('chunk_metadata', postgresql.JSON, server_default='{}'),
         sa.Column('created_at', sa.DateTime(), server_default=sa.func.now()),
     )
     
