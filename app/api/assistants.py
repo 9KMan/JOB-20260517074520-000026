@@ -17,6 +17,7 @@ from app.api.deps import get_current_user, check_assistant_access
 from app.models.models import User
 from app.services.router import router as ai_router
 from app.services.vector_service import rag_service
+from app.services.ai_service import ai_service
 from app.services.billing_service import billing_service
 from app.core.permissions import has_permission, Permission
 
@@ -111,8 +112,42 @@ async def chat_with_assistant(
         preferences=assistant.model_preferences or [],
     )
 
-    input_tokens = len(conversation_text) // 4
-    output_tokens = len(conversation_text) // 2
+    embeddings_result = await db.execute(
+        select(KnowledgeEmbedding).where(
+            KnowledgeEmbedding.tenant_id == user.tenant_id,
+            KnowledgeEmbedding.assistant_id == assistant_id
+        )
+    )
+    embeddings_records = embeddings_result.scalars().all()
+
+    context_chunks = []
+    if embeddings_records:
+        embeddings_matrix = [emb.embedding for emb in embeddings_records if emb.embedding]
+        chunk_texts = [emb.chunk_text for emb in embeddings_records]
+        if embeddings_matrix and chunk_texts:
+            retrieved = await rag_service.retrieve_relevant(
+                conversation_text,
+                embeddings_matrix,
+                chunk_texts,
+                top_k=5
+            )
+            context_chunks = [r["chunk_text"] for r in retrieved]
+
+    messages_dict = [{"role": m.role, "content": m.content} for m in chat_request.messages]
+    
+    if context_chunks:
+        response_text, input_tokens, output_tokens = await ai_service.chat_with_rag(
+            messages=messages_dict,
+            model=model,
+            context_chunks=context_chunks,
+            system_prompt=assistant.system_prompt,
+        )
+    else:
+        response_text, input_tokens, output_tokens = await ai_service.chat(
+            messages=messages_dict,
+            model=model,
+            system_prompt=assistant.system_prompt,
+        )
 
     await billing_service.record_usage(
         db=db,
@@ -126,11 +161,11 @@ async def chat_with_assistant(
     return ChatResponse(
         assistant_id=assistant.id,
         model=model,
-        message="AI response would be generated here. Integrate with actual AI provider.",
+        message=response_text,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_cents=billing_service.calculate_cost(model, input_tokens, output_tokens) * 100,
-        sources=None,
+        sources=[{"chunk": c, "score": 1.0} for c in context_chunks] if context_chunks else None,
     )
 
 

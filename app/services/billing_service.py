@@ -3,8 +3,13 @@ from datetime import datetime, timedelta
 from uuid import UUID
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.models import TokenUsage
+import stripe
+from app.models.models import TokenUsage, Tenant
 from app.services.router import MODEL_COSTS
+from app.core.config import get_settings
+
+settings = get_settings()
+stripe.api_key = settings.stripe_api_key
 
 
 class BillingService:
@@ -102,6 +107,61 @@ class BillingService:
         total_spent = float(result.scalar() or 0)
 
         return total_spent >= monthly_limit_cents
+
+    async def create_stripe_invoice(
+        self,
+        db: AsyncSession,
+        tenant_id: UUID,
+        usage_amount_cents: float
+    ) -> Optional[str]:
+        result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+        tenant = result.scalar_one_or_none()
+        
+        if not tenant or not tenant.stripe_customer_id:
+            return None
+        
+        try:
+            invoice = stripe.Invoice.create(
+                customer=tenant.stripe_customer_id,
+                auto_advance=True,
+                collection_method='send_invoice',
+                days_until_due=30,
+            )
+            
+            stripe.InvoiceItem.create(
+                customer=tenant.stripe_customer_id,
+                amount=int(usage_amount_cents),
+                currency='usd',
+                description='AI Assistant Usage',
+                invoice=invoice.id,
+            )
+            
+            return invoice.id
+        except Exception:
+            return None
+
+    async def charge_stored_payment(
+        self,
+        db: AsyncSession,
+        tenant_id: UUID,
+        amount_cents: int
+    ) -> bool:
+        result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+        tenant = result.scalar_one_or_none()
+        
+        if not tenant or not tenant.stripe_customer_id:
+            return False
+        
+        try:
+            payment_intent = stripe.PaymentIntent.create(
+                amount=amount_cents,
+                currency='usd',
+                customer=tenant.stripe_customer_id,
+                automatic_payment_methods={'enabled': True},
+            )
+            return payment_intent.status == 'requires_payment_method'
+        except Exception:
+            return False
 
 
 billing_service = BillingService()

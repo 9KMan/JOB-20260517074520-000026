@@ -27,7 +27,7 @@ async def inbound_webhook(
     return {"status": "received"}
 
 
-@router.post("/outbound", response_model=List[WebhookEndpointResponse])
+@router.get("/outbound", response_model=List[WebhookEndpointResponse])
 async def list_webhooks(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
