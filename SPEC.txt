@@ -1,0 +1,167 @@
+# Senior Backend Developer — AI Orchestration & Multi-Model Routing Platform
+
+## 1. Project Overview
+
+**Client:** AI Orchestration Platform (Upwork — real clients onboarded)
+**Goal:** Build a multi-tenant AI assistant backend with model routing, vector knowledge storage, webhook integrations, token billing, and per-client auth isolation.
+**Duration:** 6+ months, 30+ hrs/week | Contract-to-hire
+**Tech Stack:** Python/FastAPI, PostgreSQL+pgvector, Redis, Docker, LangChain, n8n, Stripe
+
+---
+
+## 2. Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     CLIENT LAYER                                │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │ Email Bot    │  │ Messaging    │  │ Web Dashboard       │  │
+│  │ (SMTP/IMAP)  │  │ (Slack/Discord│  │ (React + API)       │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
+└─────────┼─────────────────┼─────────────────────┼──────────────┘
+          │                 │                     │
+          └─────────────────┴─────────────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │   API Gateway     │
+                    │  (FastAPI + Redis │
+                    │   session/cache)  │
+                    └─────────┬─────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+ ┌──────▼──────┐    ┌────────▼────────┐   ┌───────▼──────┐
+ │ AI Router   │    │  Vector Store   │   │ Auth/Perms   │
+ │ (Claude/    │    │  (pgvector +    │   │ (JWT + RBAC  │
+ │  GPT-4/     │    │   knowledge     │   │  per tenant) │
+ │  Gemini)    │    │   embeddings)   │   │              │
+ └──────┬──────┘    └────────┬────────┘   └───────┬──────┘
+        │                    │                     │
+        └────────────────────┴─────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+     ┌────────▼────┐  ┌──────▼──────┐  ┌────▼────────────┐
+     │ Token Usage  │  │ Webhook Hub │  │ n8n Workflows   │
+     │ Tracker +    │  │ (ERP/HR/    │  │ (automation     │
+     │ Billing      │  │  Acctg)     │  │  triggers)      │
+     └──────────────┘  └─────────────┘  └─────────────────┘
+```
+
+---
+
+## 3. Core Workstreams
+
+### Workstream 1: Multi-Tenant Backend Architecture
+- FastAPI app with tenant isolation via `X-Tenant-ID` header + PostgreSQL row-level security
+- Each client in isolated schema: `client_{tenant_id}.*` tables or shared table with `tenant_uuid` FK
+- JWT tokens scoped to `{user_id, tenant_id, assistant_id}`
+- Redis namespace per tenant: `tenant:{id}:session`, `tenant:{id}:ratelimit`
+
+### Workstream 2: AI Routing Engine
+- Request classifier: categorizes incoming task (code, analysis, summarization, QA, creative)
+- Router picks optimal model: Claude (reasoning), GPT-4 (general), Gemini (long context)
+- Fallback chain with retry logic
+- LangChain integration for structured prompts + tool use
+- Per-request token cost tracking → `token_usage` table
+
+### Workstream 3: Vector Knowledge Storage (RAG)
+- pgvector for embedding storage: `knowledge_embeddings(id, tenant_id, chunk_text, embedding[1536], metadata)`
+- `/train` endpoint: accepts docs → splits → embeds via OpenAI `text-embedding-3-small` → stores in pgvector
+- Retrieval: `pgvector.inner_product` similarity search with tenant-scoped query
+- Re-ranking with cross-encoder for context quality
+
+### Workstream 4: Webhook & REST API Hub
+- Outbound webhooks: notify ERP/HR/accounting on events (assistant trained, threshold reached)
+- Inbound webhook receiver: receives data from external systems → triggers assistant response
+- REST endpoints: `/assistants/{id}/chat`, `/assistants/{id}/train`, `/usage/{tenant_id}`, `/integrations`
+- Webhook signature verification (HMAC-SHA256)
+
+### Workstream 5: Token Usage + Billing Triggers
+- `token_usage` table: `(id, tenant_id, assistant_id, model, input_tokens, output_tokens, cost_cents, created_at)`
+- Daily aggregation job → `monthly_usage` materialized view
+- Stripe integration: when `monthly_spend > threshold`, create Stripe Invoice or charge stored payment method
+- Tenant-level spend alerts via email/webhook
+
+### Workstream 6: Authentication & Permissions
+- Auth: FastAPI OAuth2 + JWT (access + refresh tokens)
+- Roles: `owner`, `admin`, `user`, `viewer` per tenant
+- Permissions matrix: who can train, chat, view usage, manage integrations
+- Assistant-level permissions: user can access subset of assistants
+
+---
+
+## 4. Data Model
+
+### Core Tables
+```sql
+tenants (id, name, plan_tier, stripe_customer_id, created_at)
+users (id, tenant_id, email, password_hash, role, created_at)
+assistants (id, tenant_id, name, model_preferences, system_prompt, created_at)
+knowledge_base (id, tenant_id, assistant_id, chunk_text, embedding vector, metadata jsonb)
+token_usage (id, tenant_id, assistant_id, model, input_tokens, output_tokens, cost_cents, created_at)
+webhook_endpoints (id, tenant_id, url, events[], secret_hash)
+```
+
+### pgvector Schema
+```sql
+CREATE EXTENSION vector;
+CREATE TABLE knowledge_embeddings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL,
+  assistant_id UUID NOT NULL,
+  chunk_text TEXT NOT NULL,
+  embedding vector(1536),
+  metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX ON knowledge_embeddings USING ivfflat (embedding vector_cosine_ops)
+  WITH (lists = 100) WHERE tenant_id = $1;
+```
+
+---
+
+## 5. API Design
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `POST /auth/login` | POST | Authenticate user, return JWT |
+| `POST /auth/refresh` | POST | Refresh access token |
+| `GET /tenants/{id}/assistants` | GET | List tenant's assistants |
+| `POST /assistants/{id}/chat` | POST | Send message to assistant (AI routing + RAG) |
+| `POST /assistants/{id}/train` | POST | Upload docs → embed + store |
+| `GET /usage/{tenant_id}` | GET | Token usage summary |
+| `POST /webhooks/inbound` | POST | Receive external webhook events |
+| `GET /integrations/{tenant_id}` | GET | List configured integrations |
+| `POST /integrations/{tenant_id}` | POST | Add new integration |
+| `DELETE /assistants/{id}` | DELETE | Delete assistant + associated embeddings |
+
+---
+
+## 6. Technical Decisions
+
+1. **Multi-tenancy:** Shared schema with `tenant_uuid` FK — simpler than per-schema, avoids cross-tenant query complexity. Row-level security enforced at Postgres level.
+2. **Vector DB:** pgvector over dedicated vector DB (Pinecone/Qdrant) — keeps stack simple, no extra service to operate, full SQL joins on embeddings
+3. **AI Router:** Deterministic rule-based classifier → model mapping, not LLM-based routing (too slow/expensive for routing decisions)
+4. **LangChain:** Use LangChain's `AgentExecutor` + tool integration for multi-step reasoning; `ConversationalRetrievalChain` for RAG
+5. **Billing:** Stripe Invoicing API — generate monthly invoice from token usage; webhook confirms payment
+
+---
+
+## 7. Out of Scope
+
+- Frontend dashboard development (React app provided by client's team)
+- Messaging platform bot implementation (email/webhook only for V1)
+- Mobile app development
+- n8n workflow authoring (config only, no custom nodes)
+
+---
+
+## 8. Success Metrics
+
+- AI router achieves >95% correct model selection (evaluated against labeled test set)
+- RAG retrieval p95 latency <800ms for 10k-document knowledge base
+- Zero cross-tenant data leakage (verified by integration tests with isolation checks)
+- Token billing reconciles within 1% of actual API spend
+- Webhook delivery success rate >99.5% with 3-retry exponential backoff
+- All endpoints authenticated, RBAC tested for all 4 roles
